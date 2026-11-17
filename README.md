@@ -16,7 +16,7 @@ The project tries to answer one question: **when is it worth training a small mo
 
 They are compared on **quality** (macro-F1 is the main metric), **cost per 1,000 messages**, and **latency**. No winner is assumed in advance.
 
-The models are trained and evaluated on [BANKING77](https://huggingface.co/datasets/PolyAI/banking77) (PolyAI, CC BY 4.0): about 13k English banking messages labeled with 77 intents. Dataset revision used: _to be recorded_.
+The models are trained and evaluated on [BANKING77](https://huggingface.co/datasets/PolyAI/banking77) (PolyAI, CC BY 4.0): about 13k English banking messages labeled with 77 intents. Dataset revision used: `1846984189f2bc0ac51c6fc3a600fa9e1714e0c6`.
 
 ## Stack
 
