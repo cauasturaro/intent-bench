@@ -1,0 +1,18 @@
+# Large artifacts (models, splits, caches) are kept out of Git
+artifacts/*
+!artifacts/.gitkeep
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Secrets (LLM API key)
+.env
+
+# macOS
+.DS_Store
