@@ -11,7 +11,14 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
 from intent_bench.data import REVISION, SEED, load_banking77, load_split
-from intent_bench.evaluate import classification_metrics, measure_latency
+from intent_bench.evaluate import (
+    MAX_AUTO_ERROR_RATE,
+    choose_threshold,
+    classification_metrics,
+    coverage_error_curve,
+    measure_latency,
+    worst_classes,
+)
 
 MODEL_DIR = Path("artifacts/baseline")
 MODEL_VERSION = "tfidf-logreg-v1"
@@ -24,6 +31,7 @@ GRID = {
 
 
 def build_pipeline(C: float, ngram_range: tuple[int, int]) -> Pipeline:
+    """TF-IDF word features feeding a multinomial logistic regression."""
     return Pipeline(
         [
             ("tfidf", TfidfVectorizer(ngram_range=ngram_range, sublinear_tf=True)),
@@ -55,6 +63,19 @@ def main() -> None:
     # Refit the best configuration on the same training part; the validation part
     # stays held out so we can pick the review threshold on it later.
     model = build_pipeline(best["C"], tuple(best["ngram_range"])).fit(X_tr, y_tr)
+
+    # Review threshold: the score is the highest predicted probability.
+    proba = model.predict_proba(X_val)
+    y_pred, scores = proba.argmax(axis=1), proba.max(axis=1)
+    curve = coverage_error_curve(y_val, y_pred, scores)
+    review = choose_threshold(curve, MAX_AUTO_ERROR_RATE)
+    print(f"review threshold (max auto error {MAX_AUTO_ERROR_RATE:.0%}): {review}")
+
+    worst = worst_classes(y_val, y_pred, label_names)
+    print("worst classes on validation:")
+    for row in worst:
+        print(f"  {row['intent']:<40} f1={row['f1']:.2f}  -> {row['most_confused_with']}")
+
     latency = measure_latency(lambda t: model.predict_proba([t]), X_val.tolist())
     print(f"latency (CPU, 1 message at a time): {latency}")
 
@@ -68,7 +89,10 @@ def main() -> None:
         "best_params": {"C": best["C"], "ngram_range": best["ngram_range"]},
         "val_metrics": {k: best[k] for k in ("macro_f1", "accuracy")},
         "dummy_val_metrics": dummy_metrics,
+        "review": {"max_auto_error_rate": MAX_AUTO_ERROR_RATE, **review},
         "latency": latency,
+        "worst_classes": worst,
+        "coverage_error_curve": curve,
         "grid_results": results,
     }
     (MODEL_DIR / "metadata.json").write_text(json.dumps(metadata, indent=2))
