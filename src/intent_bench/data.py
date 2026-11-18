@@ -1,3 +1,8 @@
+"""Load BANKING77 and build a reproducible, leakage-free train/validation split.
+
+Run ``uv run python -m intent_bench.data`` to write ``artifacts/split.json``.
+"""
+
 import json
 from pathlib import Path
 
@@ -12,6 +17,7 @@ SPLIT_PATH = Path("artifacts/split.json")
 
 
 def normalize(text: str) -> str:
+    """Lowercase and collapse all whitespace, used to detect duplicate messages."""
     return " ".join(text.lower().split())
 
 
