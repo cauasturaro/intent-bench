@@ -12,9 +12,13 @@ MAX_AUTO_ERROR_RATE = 0.05
 
 
 def classification_metrics(y_true: Sequence[int], y_pred: Sequence[int]) -> dict[str, float]:
-    """Macro-F1 (main metric: every intent weighs the same) and accuracy."""
+    """Macro-F1 (main metric: every intent weighs the same) and accuracy.
+
+    Averaging only over the true intents means an invalid prediction (e.g. -1 for an LLM
+    answer outside the label list) counts as an error, not as an extra class.
+    """
     return {
-        "macro_f1": float(f1_score(y_true, y_pred, average="macro")),
+        "macro_f1": float(f1_score(y_true, y_pred, labels=np.unique(y_true), average="macro")),
         "accuracy": float(accuracy_score(y_true, y_pred)),
     }
 
@@ -42,11 +46,12 @@ def coverage_error_curve(
 
 def choose_threshold(curve: list[dict[str, float]], max_error_rate: float) -> dict[str, float]:
     """Pick the lowest threshold whose error rate on auto-routed messages is within budget,
-    which is the one that sends the fewest messages to human review."""
+    which is the one that sends the fewest messages to human review.
+    ``meets_target`` is False when no threshold reaches the budget (the highest one is returned)."""
     for point in curve:  # thresholds ascend, so coverage descends
         if point["error_rate"] <= max_error_rate:
-            return point
-    return curve[-1]
+            return {**point, "meets_target": True}
+    return {**curve[-1], "meets_target": False}
 
 
 def worst_classes(
@@ -59,7 +64,8 @@ def worst_classes(
     rows = []
     for label in np.argsort(f1s)[:n]:
         wrong = y_pred[(y_true == label) & (y_pred != label)]
-        top = np.bincount(wrong, minlength=len(labels)).argmax() if len(wrong) else None
+        valid = wrong[wrong >= 0]  # invalid predictions are errors but have no label
+        top = np.bincount(valid, minlength=len(labels)).argmax() if len(valid) else None
         rows.append(
             {
                 "intent": label_names[label],
