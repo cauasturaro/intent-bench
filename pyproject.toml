@@ -8,6 +8,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "datasets>=5.2.0",
+    "fastapi>=0.163.2",
     "joblib>=1.6.0",
     "numpy>=2.5.5",
     "openai>=3.54.0",
@@ -16,6 +17,7 @@ dependencies = [
     "scikit-learn>=1.9.1",
     "torch>=2.15.0",
     "transformers>=5.23.0",
+    "uvicorn>=0.54.0",
 ]
 
 [build-system]
@@ -24,6 +26,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "jupyter>=1.1.1",
     "pytest>=9.2.0",
 ]

@@ -158,6 +158,61 @@ def classify(
     return {**record, "from_cache": False}
 
 
+def predict(
+    texts: list[str],
+    mode: str,
+    samples: int,
+    X_tr: list[str],
+    y_tr: list[int],
+    label_names: list[str],
+) -> dict:
+    """Classify texts with the API and return predictions, review scores, and per-message
+    cost and latency. Few-shot examples always come from the training part."""
+    load_dotenv()
+    client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url=BASE_URL, max_retries=5)
+    examples = pick_examples(X_tr, y_tr, label_names) if mode == "few" else []
+    system_prompt = build_system_prompt(label_names, examples)
+    cache = Cache()
+
+    with ThreadPoolExecutor(MAX_WORKERS) as pool:
+        records = list(pool.map(lambda t: classify(client, cache, system_prompt, t), texts))
+    y_pred = np.array([parse_label(r["answer"], label_names) for r in records])
+
+    # Self-consistency score: share of extra samples that agree with the temperature-0 answer.
+    # Without samples every score is 1, so no message can be sent to review.
+    extra = [[] for _ in texts]
+    if samples:
+        jobs = [(i, k) for i in range(len(texts)) for k in range(samples)]
+        with ThreadPoolExecutor(MAX_WORKERS) as pool:
+            done = pool.map(lambda j: classify(client, cache, system_prompt, texts[j[0]], j[1]), jobs)
+            for (i, _), record in zip(jobs, done):
+                extra[i].append(record)
+    scores = np.array(
+        [
+            np.mean([parse_label(r["answer"], label_names) == p for r in group]) if group else 1.0
+            for p, group in zip(y_pred, extra)
+        ]
+    )
+
+    calls = [[r, *group] for r, group in zip(records, extra)]  # all calls per message
+    return {
+        "y_pred": y_pred,
+        "scores": scores,
+        "answers": [r["answer"] for r in records],
+        "system_prompt": system_prompt,
+        "n_examples": len(examples),
+        "costs": [sum(cost_usd(r["usage"]) for r in group) for group in calls],
+        # Calls for one message can run in parallel, so its latency is the slowest of them.
+        "latencies": [max(r["latency_ms"] for r in group) for group in calls],
+        "tokens": {
+            k: int(sum(r["usage"][k] for group in calls for r in group))
+            for k in records[0]["usage"]
+        },
+        "served_models": sorted({r["model"] for group in calls for r in group}),
+        "run_dates": sorted({r["created_at"][:10] for group in calls for r in group}),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["zero", "few"], required=True)
@@ -170,9 +225,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    load_dotenv()
-    client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url=BASE_URL, max_retries=5)
-
     train, _, label_names = load_banking77()
     train_idx, val_idx = load_split()
     X_tr = train["text"].iloc[train_idx].tolist()
@@ -180,75 +232,46 @@ def main() -> None:
     X_val = train["text"].iloc[val_idx].tolist()[: args.limit]
     y_val = train["label"].iloc[val_idx].tolist()[: args.limit]
 
-    examples = pick_examples(X_tr, y_tr, label_names) if args.mode == "few" else []
-    system_prompt = build_system_prompt(label_names, examples)
-    cache = Cache()
-
-    with ThreadPoolExecutor(MAX_WORKERS) as pool:
-        records = list(pool.map(lambda t: classify(client, cache, system_prompt, t), X_val))
-
-    y_pred = np.array([parse_label(r["answer"], label_names) for r in records])
-
-    # Self-consistency score: share of extra samples that agree with the temperature-0 answer.
-    # Without samples every score is 1, so no message can be sent to review.
-    samples = [[] for _ in X_val]
-    if args.samples:
-        jobs = [(i, k) for i in range(len(X_val)) for k in range(args.samples)]
-        with ThreadPoolExecutor(MAX_WORKERS) as pool:
-            done = pool.map(lambda j: classify(client, cache, system_prompt, X_val[j[0]], j[1]), jobs)
-            for (i, _), record in zip(jobs, done):
-                samples[i].append(record)
-    scores = np.array(
-        [
-            np.mean([parse_label(r["answer"], label_names) == p for r in group]) if group else 1.0
-            for p, group in zip(y_pred, samples)
-        ]
-    )
+    res = predict(X_val, args.mode, args.samples, X_tr, y_tr, label_names)
+    y_pred, costs, latencies = res["y_pred"], res["costs"], res["latencies"]
     n_invalid = int((y_pred == INVALID).sum())
 
     metrics = classification_metrics(y_val, y_pred)
-    curve = coverage_error_curve(y_val, y_pred, scores)
+    curve = coverage_error_curve(y_val, y_pred, res["scores"])
     review = choose_threshold(curve, MAX_AUTO_ERROR_RATE)
     worst = worst_classes(y_val, y_pred, label_names)
 
-    calls = [[r, *group] for r, group in zip(records, samples)]  # all calls per message
-    costs = [sum(cost_usd(r["usage"]) for r in group) for group in calls]
-    # Calls for one message can run in parallel, so its latency is the slowest of them.
-    latencies = [max(r["latency_ms"] for r in group) for group in calls]
-    tokens = {
-        k: int(sum(r["usage"][k] for group in calls for r in group)) for k in records[0]["usage"]
-    }
-
-    print(f"mode={args.mode} n={len(records)} invalid={n_invalid} {metrics}")
+    print(f"mode={args.mode} n={len(y_pred)} invalid={n_invalid} {metrics}")
     print(f"review threshold (max auto error {MAX_AUTO_ERROR_RATE:.0%}): {review}")
-    print(f"cost per 1,000 messages: ${1000 * np.mean(costs):.4f} (peak rates) tokens={tokens}")
+    print(f"cost per 1,000 messages: ${1000 * np.mean(costs):.4f} (peak rates) tokens={res['tokens']}")
     print(f"latency: median={np.median(latencies):.0f} ms p95={np.percentile(latencies, 95):.0f} ms")
     for row in worst:
         print(f"  {row['intent']:<40} f1={row['f1']:.2f}  -> {row['most_confused_with']}")
 
     out = OUT_DIR / args.mode
     out.mkdir(parents=True, exist_ok=True)
-    invalid_answers = sorted({r["answer"] for r, p in zip(records, y_pred) if p == INVALID})
+    invalid_answers = sorted({a for a, p in zip(res["answers"], y_pred) if p == INVALID})
     metadata = {
         "model_version": f"{MODEL}-{args.mode}-shot-v1",
+        "samples": args.samples,
         "score": f"self-consistency over {args.samples} samples at T={SAMPLE_TEMPERATURE}"
         if args.samples
         else "none (always 1)",
         "model": MODEL,
-        "served_models": sorted({r["model"] for r in records}),
-        "run_dates": sorted({r["created_at"][:10] for group in calls for r in group}),
+        "served_models": res["served_models"],
+        "run_dates": res["run_dates"],
         "dataset_revision": REVISION,
         "seed": SEED,
-        "n_messages": len(records),
-        "few_shot_per_intent": FEW_SHOT_PER_INTENT if examples else 0,
-        "system_prompt": system_prompt,
+        "n_messages": len(y_pred),
+        "few_shot_per_intent": FEW_SHOT_PER_INTENT if res["n_examples"] else 0,
+        "system_prompt": res["system_prompt"],
         "price_per_m_tokens_peak": PRICE_PER_M,
         "val_metrics": metrics,
         "n_invalid": n_invalid,
         "invalid_answers": invalid_answers,
         "review": {"max_auto_error_rate": MAX_AUTO_ERROR_RATE, **review},
         "cost_per_1000_usd": float(1000 * np.mean(costs)),
-        "tokens": tokens,
+        "tokens": res["tokens"],
         "latency": {
             "latency_median_ms": float(np.median(latencies)),
             "latency_p95_ms": float(np.percentile(latencies, 95)),

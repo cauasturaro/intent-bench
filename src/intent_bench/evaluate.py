@@ -77,6 +77,24 @@ def worst_classes(
     return rows
 
 
+def bootstrap_macro_f1(
+    y_true: Sequence[int], preds: dict[str, Sequence[int]], n_boot: int = 1000, seed: int = 0
+) -> dict[str, np.ndarray]:
+    """Macro-F1 of each model on n_boot resamples of the test set. The same resampled rows
+    are used for every model, so differences between models can be compared pairwise."""
+    y_true = np.asarray(y_true)
+    labels = np.unique(y_true)
+    rng = np.random.default_rng(seed)
+    out = {name: np.empty(n_boot) for name in preds}
+    for b in range(n_boot):
+        idx = rng.integers(0, len(y_true), len(y_true))
+        for name, y_pred in preds.items():
+            out[name][b] = f1_score(
+                y_true[idx], np.asarray(y_pred)[idx], labels=labels, average="macro"
+            )
+    return out
+
+
 def measure_latency(
     predict_one: Callable[[str], object], texts: Sequence[str], warmup: int = 20
 ) -> dict[str, float]:
